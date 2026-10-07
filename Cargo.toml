@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 blake3 = "1.8"
 clap = { version = "4.6", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 walkdir = "2.5"
 
 [dev-dependencies]

@@ -206,23 +206,44 @@ fn missing_argument_is_explained_with_exit_code_2() {
         .assert()
         .code(2)
         .stdout(predicate::str::is_empty())
-        .stderr(predicate::str::contains("Укажите папку"))
+        .stderr(predicate::str::contains(
+            "Укажите папку, в которой искать одинаковые файлы или похожие фото",
+        ))
         .stderr(predicate::str::contains("Справка: dupes --help"));
 }
 
 #[test]
 fn help_is_fully_in_russian() {
-    cargo_bin_cmd!("dupes")
+    let assert = cargo_bin_cmd!("dupes")
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Использование:"))
+        .stdout(predicate::str::contains(
+            "Использование: dupes [ПАРАМЕТРЫ] <ПАПКА>",
+        ))
         .stdout(predicate::str::contains("ПАПКА"))
         .stdout(predicate::str::contains("Показать эту справку"))
-        .stdout(predicate::str::contains("Usage").not())
-        .stdout(predicate::str::contains("Arguments").not())
-        .stdout(predicate::str::contains("Options").not())
-        .stdout(predicate::str::contains("Print help").not());
+        .stdout(predicate::str::contains("--similar"))
+        .stdout(predicate::str::contains("--similarity"))
+        .stdout(predicate::str::contains("ПРОЦЕНТ"))
+        .stdout(predicate::str::contains("По умолчанию — 90"));
+
+    let help = String::from_utf8(assert.get_output().stdout.clone())
+        .unwrap()
+        .to_lowercase();
+    for english_word in [
+        "usage",
+        "arguments",
+        "options",
+        "option",
+        "print help",
+        "default",
+    ] {
+        assert!(
+            !help.contains(english_word),
+            "«{english_word}» в справке:\n{help}"
+        );
+    }
 }
 
 #[cfg(unix)]
