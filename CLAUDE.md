@@ -4,7 +4,9 @@
 
 Процесс разработки ведёт Cyberzavod (harness 0.7.1, процесс `default`): Постановка → Код → Ревью → Проверки → Фиксация. Задачу через весь процесс проводит `/feature <задача>`; роли этапов — агенты в `.claude/agents/`.
 
-Проверки проекта не заданы: впиши их в `verification.commands` файла `.cyberzavod/project.json`.
+Проверки проекта (`verification.commands` в `.cyberzavod/project.json`) должны быть зелёными перед коммитом:
+
+- `make check`
 
 ## Архитектура
 

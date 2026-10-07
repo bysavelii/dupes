@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "2026-10-07-4c366524",
+  "timestamp": "2026-10-07T21:53:50.654Z",
+  "projectId": "dupes",
+  "source": {
+    "type": "manual"
+  },
+  "type": "decision",
+  "data": {
+    "title": "Cyberzavod sync запускается локальным CLI .cyberzavod/bin/cyberzavod.mjs, а не npx",
+    "description": "Та же версия harness 0.7.1, без скачивания пакета"
+  }
+}

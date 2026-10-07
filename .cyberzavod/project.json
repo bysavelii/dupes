@@ -26,11 +26,19 @@
     }
   },
   "verification": {
-    "commands": [],
-    "paths": []
+    "commands": [
+      "make check"
+    ],
+    "paths": [
+      "src",
+      "tests"
+    ]
   },
   "stack": {
-    "languages": [],
-    "frameworks": []
+    "languages": [
+      "rust"
+    ],
+    "frameworks": [],
+    "packageManager": "cargo"
   }
 }
