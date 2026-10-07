@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use image::{DynamicImage, ImageError, ImageFormat, ImageReader};
 
@@ -8,8 +8,7 @@ use crate::skipped::{SkipReason, SkippedPath};
 
 #[derive(Debug)]
 pub struct Photo {
-    pub path: PathBuf,
-    pub size: u64,
+    pub file: ScannedFile,
     pub width: u32,
     pub height: u32,
     pub hash: PerceptualHash,
@@ -35,8 +34,7 @@ pub fn read_photo(file: ScannedFile) -> Result<Photo, SkippedPath> {
         hash: PerceptualHash::of_image(&image),
         width: image.width(),
         height: image.height(),
-        size: file.size,
-        path: file.path,
+        file,
     })
 }
 
@@ -53,14 +51,16 @@ mod tests {
     use super::*;
     use crate::test_images::scene_image;
     use std::fs;
+    use std::path::PathBuf;
+    use std::time::SystemTime;
     use tempfile::TempDir;
 
     const WIDTH: u32 = 64;
     const HEIGHT: u32 = 48;
 
     fn scanned(path: PathBuf) -> ScannedFile {
-        let size = fs::metadata(&path).unwrap().len();
-        ScannedFile { path, size }
+        let metadata = fs::metadata(&path).unwrap();
+        ScannedFile::from_metadata(path, &metadata).unwrap()
     }
 
     #[test]
@@ -85,9 +85,9 @@ mod tests {
 
         let photo = read_photo(scanned(path.clone())).unwrap();
 
-        assert_eq!(photo.path, path);
+        assert_eq!(photo.file.path, path);
         assert_eq!((photo.width, photo.height), (WIDTH, HEIGHT));
-        assert_eq!(photo.size, fs::metadata(&path).unwrap().len());
+        assert_eq!(photo.file.size, fs::metadata(&path).unwrap().len());
     }
 
     #[test]
@@ -121,6 +121,8 @@ mod tests {
         let file = ScannedFile {
             path: folder.path().join("gone.png"),
             size: 0,
+            modified: SystemTime::UNIX_EPOCH,
+            identity: None,
         };
 
         let skipped = read_photo(file).unwrap_err();

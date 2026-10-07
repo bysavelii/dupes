@@ -1,23 +1,40 @@
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+use crate::cleanup::CleanupGroup;
 use crate::scan::ScannedFile;
 use crate::skipped::SkippedPath;
 
-/// Файлы с одинаковым содержимым; в группе всегда не меньше двух путей.
+/// Файлы с одинаковым содержимым: `kept` остаётся, `copies` — лишние, по пути.
+/// В группе всегда есть хотя бы одна копия.
 #[derive(Debug)]
 pub struct DuplicateGroup {
-    pub size: u64,
-    pub paths: Vec<PathBuf>,
+    pub kept: ScannedFile,
+    pub copies: Vec<ScannedFile>,
 }
 
 impl DuplicateGroup {
+    /// Размер каждого файла группы: содержимое у всех одинаковое.
+    pub fn size(&self) -> u64 {
+        self.kept.size
+    }
+
     /// Сколько места освободится, если оставить в группе один файл.
     pub fn reclaimable_bytes(&self) -> u64 {
-        let extra_copies = self.paths.len().saturating_sub(1) as u64;
-        self.size * extra_copies
+        self.copies.iter().map(|copy| copy.size).sum()
+    }
+}
+
+impl CleanupGroup for DuplicateGroup {
+    fn kept_file(&self) -> &ScannedFile {
+        &self.kept
+    }
+
+    fn extra_files(&self) -> Vec<&ScannedFile> {
+        self.copies.iter().collect()
     }
 }
 
@@ -45,8 +62,8 @@ pub fn find_duplicates(files: Vec<ScannedFile>) -> DuplicateSearch {
     let mut unsorted_groups = Vec::new();
     let mut skipped = Vec::new();
 
-    for (size, paths) in group_by_size(files) {
-        let hashed = group_by_content(size, paths);
+    for same_size_files in group_by_size(files).into_values() {
+        let hashed = group_by_content(same_size_files);
         unsorted_groups.extend(hashed.groups);
         skipped.extend(hashed.skipped);
     }
@@ -58,35 +75,35 @@ pub fn find_duplicates(files: Vec<ScannedFile>) -> DuplicateSearch {
 
 /// Оставляет только размеры, у которых есть хотя бы два файла: остальные не могут быть дубликатами.
 /// Пустые файлы не считаются: у них нечего освобождать.
-fn group_by_size(files: Vec<ScannedFile>) -> BTreeMap<u64, Vec<PathBuf>> {
-    let mut paths_by_size: BTreeMap<u64, Vec<PathBuf>> = BTreeMap::new();
+fn group_by_size(files: Vec<ScannedFile>) -> BTreeMap<u64, Vec<ScannedFile>> {
+    let mut files_by_size: BTreeMap<u64, Vec<ScannedFile>> = BTreeMap::new();
     for file in files {
-        paths_by_size.entry(file.size).or_default().push(file.path);
+        files_by_size.entry(file.size).or_default().push(file);
     }
 
-    paths_by_size.remove(&0);
-    paths_by_size.retain(|_, paths| paths.len() >= 2);
-    paths_by_size
+    files_by_size.remove(&0);
+    files_by_size.retain(|_, same_size_files| same_size_files.len() >= 2);
+    files_by_size
 }
 
-fn group_by_content(size: u64, paths: Vec<PathBuf>) -> HashedSizeGroup {
-    let mut paths_by_hash: HashMap<blake3::Hash, Vec<PathBuf>> = HashMap::new();
+fn group_by_content(files: Vec<ScannedFile>) -> HashedSizeGroup {
+    let mut files_by_hash: HashMap<blake3::Hash, Vec<ScannedFile>> = HashMap::new();
     let mut skipped = Vec::new();
 
-    for path in paths {
-        match hash_content(&path) {
-            Ok(hash) => paths_by_hash.entry(hash).or_default().push(path),
+    for file in files {
+        match hash_content(&file.path) {
+            Ok(hash) => files_by_hash.entry(hash).or_default().push(file),
             Err(error) => skipped.push(SkippedPath {
                 reason: (&error).into(),
-                path,
+                path: file.path,
             }),
         }
     }
 
-    let groups = paths_by_hash
+    let groups = files_by_hash
         .into_values()
-        .filter(|paths| paths.len() >= 2)
-        .map(|paths| DuplicateGroup { size, paths })
+        .filter(|same_content_files| same_content_files.len() >= 2)
+        .map(split_kept_file)
         .collect();
 
     HashedSizeGroup { groups, skipped }
@@ -100,28 +117,42 @@ fn hash_content(path: &Path) -> io::Result<blake3::Hash> {
     Ok(hasher.finalize())
 }
 
+/// Оставляем самый старый файл: он, скорее всего, оригинал, а копии новее. Время создания
+/// не берём: его есть не везде, и при копировании оно сбрасывается.
+fn split_kept_file(files: Vec<ScannedFile>) -> DuplicateGroup {
+    let mut copies = files;
+    copies.sort_by(keep_priority);
+    let kept = copies.remove(0);
+    copies.sort_by(|first, second| first.path.cmp(&second.path));
+
+    DuplicateGroup { kept, copies }
+}
+
+/// Первым идёт файл, который стоит оставить: сначала самый ранний по времени изменения,
+/// при равенстве — с более коротким путём, затем первый по алфавиту.
+fn keep_priority(first: &ScannedFile, second: &ScannedFile) -> Ordering {
+    first
+        .modified
+        .cmp(&second.modified)
+        .then_with(|| {
+            first
+                .path
+                .as_os_str()
+                .len()
+                .cmp(&second.path.as_os_str().len())
+        })
+        .then_with(|| first.path.cmp(&second.path))
+}
+
 /// Порядок должен быть одинаковым при каждом запуске, поэтому при равенстве сравниваем пути.
 fn sorted_groups(groups: Vec<DuplicateGroup>) -> Vec<DuplicateGroup> {
-    let mut sorted: Vec<DuplicateGroup> = groups
-        .into_iter()
-        .map(|group| DuplicateGroup {
-            size: group.size,
-            paths: sorted_paths(group.paths),
-        })
-        .collect();
-
+    let mut sorted = groups;
     sorted.sort_by(|first, second| {
         second
             .reclaimable_bytes()
             .cmp(&first.reclaimable_bytes())
-            .then_with(|| first.paths.cmp(&second.paths))
+            .then_with(|| first.kept.path.cmp(&second.kept.path))
     });
-    sorted
-}
-
-fn sorted_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
-    let mut sorted = paths;
-    sorted.sort();
     sorted
 }
 
@@ -130,22 +161,49 @@ mod tests {
     use super::*;
     use crate::skipped::SkipReason;
     use std::fs;
+    use std::path::PathBuf;
+    use std::time::{Duration, SystemTime};
     use tempfile::TempDir;
 
+    fn modified_after_epoch(seconds: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)
+    }
+
     fn scanned(path: &str, size: u64) -> ScannedFile {
+        scanned_at(path, size, 0)
+    }
+
+    fn scanned_at(path: &str, size: u64, modified_seconds: u64) -> ScannedFile {
         ScannedFile {
             path: PathBuf::from(path),
             size,
+            modified: modified_after_epoch(modified_seconds),
+            identity: None,
         }
     }
 
     fn write_file(folder: &TempDir, name: &str, content: &str) -> ScannedFile {
+        write_file_modified(folder, name, content, 0)
+    }
+
+    fn write_file_modified(
+        folder: &TempDir,
+        name: &str,
+        content: &str,
+        modified_seconds: u64,
+    ) -> ScannedFile {
         let path = folder.path().join(name);
         fs::write(&path, content).unwrap();
         ScannedFile {
             size: content.len() as u64,
+            modified: modified_after_epoch(modified_seconds),
+            identity: None,
             path,
         }
+    }
+
+    fn paths(files: &[ScannedFile]) -> Vec<&Path> {
+        files.iter().map(|file| file.path.as_path()).collect()
     }
 
     #[test]
@@ -155,7 +213,7 @@ mod tests {
         let groups = group_by_size(files);
 
         assert_eq!(groups.len(), 1);
-        assert_eq!(groups[&10], [PathBuf::from("a"), PathBuf::from("b")]);
+        assert_eq!(paths(&groups[&10]), [Path::new("a"), Path::new("b")]);
     }
 
     #[test]
@@ -168,12 +226,78 @@ mod tests {
     }
 
     #[test]
-    fn group_reclaims_all_copies_but_one() {
+    fn oldest_file_is_kept() {
+        let group = split_kept_file(vec![
+            scanned_at("a", 5, 300),
+            scanned_at("b", 5, 100),
+            scanned_at("c", 5, 200),
+        ]);
+
+        assert_eq!(group.kept.path, PathBuf::from("b"));
+    }
+
+    #[test]
+    fn equal_age_is_decided_by_shorter_path() {
+        let group = split_kept_file(vec![
+            scanned_at("folder/a.txt", 5, 100),
+            scanned_at("z.txt", 5, 100),
+            scanned_at("folder/sub/a.txt", 5, 100),
+        ]);
+
+        assert_eq!(group.kept.path, PathBuf::from("z.txt"));
+    }
+
+    #[test]
+    fn path_length_is_counted_in_bytes() {
+        let group = split_kept_file(vec![scanned_at("яя", 5, 100), scanned_at("zzz", 5, 100)]);
+
+        assert_eq!(group.kept.path, PathBuf::from("zzz"));
+    }
+
+    #[test]
+    fn equal_age_and_length_are_decided_by_alphabet() {
+        let group = split_kept_file(vec![
+            scanned_at("c.txt", 5, 100),
+            scanned_at("a.txt", 5, 100),
+            scanned_at("b.txt", 5, 100),
+        ]);
+
+        assert_eq!(group.kept.path, PathBuf::from("a.txt"));
+    }
+
+    #[test]
+    fn older_file_wins_over_shorter_path() {
+        let group = split_kept_file(vec![
+            scanned_at("a", 5, 200),
+            scanned_at("long/path/name.txt", 5, 100),
+        ]);
+
+        assert_eq!(group.kept.path, PathBuf::from("long/path/name.txt"));
+    }
+
+    #[test]
+    fn copies_are_sorted_by_path() {
+        let group = split_kept_file(vec![
+            scanned_at("z", 5, 300),
+            scanned_at("kept", 5, 100),
+            scanned_at("m", 5, 500),
+            scanned_at("b", 5, 200),
+        ]);
+
+        assert_eq!(
+            paths(&group.copies),
+            [Path::new("b"), Path::new("m"), Path::new("z")]
+        );
+    }
+
+    #[test]
+    fn group_reclaims_all_copies_but_the_kept_one() {
         let group = DuplicateGroup {
-            size: 100,
-            paths: vec!["a".into(), "b".into(), "c".into()],
+            kept: scanned("a", 100),
+            copies: vec![scanned("b", 100), scanned("c", 100)],
         };
 
+        assert_eq!(group.size(), 100);
         assert_eq!(group.reclaimable_bytes(), 200);
     }
 
@@ -182,12 +306,12 @@ mod tests {
         let search = DuplicateSearch {
             groups: vec![
                 DuplicateGroup {
-                    size: 100,
-                    paths: vec!["a".into(), "b".into()],
+                    kept: scanned("a", 100),
+                    copies: vec![scanned("b", 100)],
                 },
                 DuplicateGroup {
-                    size: 10,
-                    paths: vec!["c".into(), "d".into(), "e".into()],
+                    kept: scanned("c", 10),
+                    copies: vec![scanned("d", 10), scanned("e", 10)],
                 },
             ],
             skipped: Vec::new(),
@@ -200,17 +324,18 @@ mod tests {
     fn identical_files_form_one_group() {
         let folder = TempDir::new().unwrap();
         let files = vec![
-            write_file(&folder, "a.txt", "same"),
-            write_file(&folder, "b.txt", "same"),
+            write_file_modified(&folder, "b.txt", "same", 200),
+            write_file_modified(&folder, "a.txt", "same", 100),
         ];
 
         let search = find_duplicates(files);
 
         assert_eq!(search.groups.len(), 1);
-        assert_eq!(search.groups[0].size, 4);
+        assert_eq!(search.groups[0].size(), 4);
+        assert_eq!(search.groups[0].kept.path, folder.path().join("a.txt"));
         assert_eq!(
-            search.groups[0].paths,
-            [folder.path().join("a.txt"), folder.path().join("b.txt")]
+            paths(&search.groups[0].copies),
+            [folder.path().join("b.txt")]
         );
         assert!(search.skipped.is_empty());
     }
@@ -229,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn groups_are_sorted_by_reclaimable_bytes_then_paths() {
+    fn groups_are_sorted_by_reclaimable_bytes_then_kept_path() {
         let folder = TempDir::new().unwrap();
         let files = vec![
             write_file(&folder, "small_b.txt", "ab"),
@@ -244,10 +369,10 @@ mod tests {
 
         let search = find_duplicates(files);
 
-        let first_paths: Vec<&PathBuf> =
-            search.groups.iter().map(|group| &group.paths[0]).collect();
+        let kept_paths: Vec<&PathBuf> =
+            search.groups.iter().map(|group| &group.kept.path).collect();
         assert_eq!(
-            first_paths,
+            kept_paths,
             [
                 &folder.path().join("big_y.txt"),
                 &folder.path().join("other_a.txt"),
@@ -256,11 +381,8 @@ mod tests {
             ]
         );
         assert_eq!(
-            search.groups[0].paths,
-            [
-                folder.path().join("big_y.txt"),
-                folder.path().join("big_z.txt")
-            ]
+            paths(&search.groups[0].copies),
+            [folder.path().join("big_z.txt")]
         );
     }
 

@@ -266,7 +266,7 @@ fn repeated_similarity_flag_is_explained_with_exit_code_2() {
         .code(2)
         .stdout(predicate::str::is_empty())
         .stderr(
-            "Параметр --similarity указан несколько раз — оставьте одно значение.\n\
+            "Параметр --similarity указан несколько раз — укажите его один раз.\n\
              Справка: dupes --help\n",
         );
 }

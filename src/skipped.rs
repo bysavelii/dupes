@@ -21,6 +21,20 @@ pub enum SkipReason {
     Unreadable(String),
 }
 
+impl SkipReason {
+    /// Стабильное имя причины для скриптов: не меняется вместе с русским текстом.
+    pub fn code(&self) -> &'static str {
+        match self {
+            SkipReason::AccessDenied => "access_denied",
+            SkipReason::Vanished => "vanished",
+            SkipReason::DamagedImage => "damaged_image",
+            SkipReason::UnsupportedImage => "unsupported_image",
+            SkipReason::ImageTooLarge => "image_too_large",
+            SkipReason::Unreadable(_) => "unreadable",
+        }
+    }
+}
+
 impl From<&io::Error> for SkipReason {
     fn from(error: &io::Error) -> Self {
         match error.kind() {
@@ -171,6 +185,19 @@ mod tests {
         assert_eq!(
             SkipReason::Unreadable("сбой диска".to_string()).to_string(),
             "непредвиденная ошибка (системное сообщение: сбой диска)"
+        );
+    }
+
+    #[test]
+    fn reasons_have_stable_codes() {
+        assert_eq!(SkipReason::AccessDenied.code(), "access_denied");
+        assert_eq!(SkipReason::Vanished.code(), "vanished");
+        assert_eq!(SkipReason::DamagedImage.code(), "damaged_image");
+        assert_eq!(SkipReason::UnsupportedImage.code(), "unsupported_image");
+        assert_eq!(SkipReason::ImageTooLarge.code(), "image_too_large");
+        assert_eq!(
+            SkipReason::Unreadable("сбой диска".to_string()).code(),
+            "unreadable"
         );
     }
 }

@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::path::PathBuf;
 
+use crate::cleanup::CleanupGroup;
 use crate::perceptual_hash::{HASH_BITS, PerceptualHash};
 use crate::photo::{Photo, is_supported_photo, read_photo};
 use crate::scan::ScannedFile;
@@ -21,8 +21,7 @@ pub fn max_hash_distance(similarity_percent: u8) -> u32 {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SimilarPhoto {
-    pub path: PathBuf,
-    pub size: u64,
+    pub file: ScannedFile,
     pub width: u32,
     pub height: u32,
 }
@@ -36,8 +35,7 @@ impl SimilarPhoto {
 impl From<Photo> for SimilarPhoto {
     fn from(photo: Photo) -> Self {
         SimilarPhoto {
-            path: photo.path,
-            size: photo.size,
+            file: photo.file,
             width: photo.width,
             height: photo.height,
         }
@@ -55,7 +53,17 @@ pub struct SimilarGroup {
 impl SimilarGroup {
     /// Сколько места освободится, если оставить в группе только лучшее фото.
     pub fn reclaimable_bytes(&self) -> u64 {
-        self.others.iter().map(|photo| photo.size).sum()
+        self.others.iter().map(|photo| photo.file.size).sum()
+    }
+}
+
+impl CleanupGroup for SimilarGroup {
+    fn kept_file(&self) -> &ScannedFile {
+        &self.best.file
+    }
+
+    fn extra_files(&self) -> Vec<&ScannedFile> {
+        self.others.iter().map(|photo| &photo.file).collect()
     }
 }
 
@@ -196,7 +204,7 @@ fn split_best_photo(photos: Vec<SimilarPhoto>) -> SimilarGroup {
 
     let mut others = photos;
     let best = others.remove(best_index);
-    others.sort_by(|first, second| first.path.cmp(&second.path));
+    others.sort_by(|first, second| first.file.path.cmp(&second.file.path));
 
     SimilarGroup { best, others }
 }
@@ -205,8 +213,8 @@ fn quality_order(first: &SimilarPhoto, second: &SimilarPhoto) -> Ordering {
     first
         .pixel_count()
         .cmp(&second.pixel_count())
-        .then_with(|| first.size.cmp(&second.size))
-        .then_with(|| second.path.cmp(&first.path))
+        .then_with(|| first.file.size.cmp(&second.file.size))
+        .then_with(|| second.file.path.cmp(&first.file.path))
 }
 
 /// Порядок должен быть одинаковым при каждом запуске, поэтому при равенстве сравниваем пути.
@@ -216,7 +224,7 @@ fn sorted_groups(groups: Vec<SimilarGroup>) -> Vec<SimilarGroup> {
         second
             .reclaimable_bytes()
             .cmp(&first.reclaimable_bytes())
-            .then_with(|| first.best.path.cmp(&second.best.path))
+            .then_with(|| first.best.file.path.cmp(&second.best.file.path))
     });
     sorted
 }
@@ -227,6 +235,8 @@ mod tests {
     use crate::skipped::SkipReason;
     use crate::test_images::scene_image;
     use std::fs;
+    use std::path::PathBuf;
+    use std::time::SystemTime;
     use tempfile::TempDir;
 
     const WIDTH: u32 = 64;
@@ -238,8 +248,12 @@ mod tests {
 
     fn photo(path: &str, width: u32, height: u32, size: u64) -> SimilarPhoto {
         SimilarPhoto {
-            path: PathBuf::from(path),
-            size,
+            file: ScannedFile {
+                path: PathBuf::from(path),
+                size,
+                modified: SystemTime::UNIX_EPOCH,
+                identity: None,
+            },
             width,
             height,
         }
@@ -252,7 +266,7 @@ mod tests {
     fn paths(photos: &[SimilarPhoto]) -> Vec<&str> {
         photos
             .iter()
-            .map(|photo| photo.path.to_str().unwrap())
+            .map(|photo| photo.file.path.to_str().unwrap())
             .collect()
     }
 
@@ -354,7 +368,7 @@ mod tests {
             photo("c.jpg", 100, 150, 20),
         ]);
 
-        assert_eq!(result.best.path, PathBuf::from("b.jpg"));
+        assert_eq!(result.best.file.path, PathBuf::from("b.jpg"));
     }
 
     #[test]
@@ -365,7 +379,7 @@ mod tests {
             photo("c.jpg", 100, 100, 20),
         ]);
 
-        assert_eq!(result.best.path, PathBuf::from("b.jpg"));
+        assert_eq!(result.best.file.path, PathBuf::from("b.jpg"));
     }
 
     #[test]
@@ -376,7 +390,7 @@ mod tests {
             photo("c.jpg", 100, 100, 10),
         ]);
 
-        assert_eq!(result.best.path, PathBuf::from("a.jpg"));
+        assert_eq!(result.best.file.path, PathBuf::from("a.jpg"));
     }
 
     #[test]
@@ -386,7 +400,7 @@ mod tests {
             photo("huge.jpg", u32::MAX, u32::MAX, 1),
         ]);
 
-        assert_eq!(result.best.path, PathBuf::from("huge.jpg"));
+        assert_eq!(result.best.file.path, PathBuf::from("huge.jpg"));
     }
 
     #[test]
@@ -436,15 +450,15 @@ mod tests {
 
         let best_paths: Vec<&str> = sorted
             .iter()
-            .map(|group| group.best.path.to_str().unwrap())
+            .map(|group| group.best.file.path.to_str().unwrap())
             .collect();
         assert_eq!(best_paths, ["c.png", "a.png", "b.png"]);
     }
 
     fn scanned_file(folder: &TempDir, name: &str) -> ScannedFile {
         let path = folder.path().join(name);
-        let size = fs::metadata(&path).unwrap().len();
-        ScannedFile { path, size }
+        let metadata = fs::metadata(&path).unwrap();
+        ScannedFile::from_metadata(path, &metadata).unwrap()
     }
 
     #[test]

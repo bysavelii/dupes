@@ -9,6 +9,8 @@ use crate::similar::{DEFAULT_SIMILARITY_PERCENT, MAX_SIMILARITY_PERCENT, MIN_SIM
 const HELP_HINT: &str = "Справка: dupes --help";
 const SIMILAR_FLAG: &str = "--similar";
 const SIMILARITY_FLAG: &str = "--similarity";
+const TRASH_FLAG: &str = "--trash";
+const CONFIRM_FLAG: &str = "--yes";
 const GENERIC_ARGUMENTS_MESSAGE: &str = "Не удалось разобрать аргументы командной строки.";
 const EXAMPLE_SIMILARITY_PERCENT: u8 = 85;
 
@@ -29,8 +31,10 @@ const HELP_TEMPLATE: &str = "\
 #[command(
     name = "dupes",
     about = "Находит одинаковые файлы и похожие фото в папке и показывает, сколько места освободится.",
+    version,
     override_usage = "dupes [ПАРАМЕТРЫ] <ПАПКА>",
     disable_help_flag = true,
+    disable_version_flag = true,
     help_template = HELP_TEMPLATE
 )]
 pub struct Cli {
@@ -52,9 +56,25 @@ pub struct Cli {
     )]
     similarity: Option<u8>,
 
+    /// Показать, какие лишние копии будут перенесены в корзину: в каждой группе остаётся самый старый файл, а среди похожих фото — фото в лучшем качестве. Файлы не трогаются, пока не добавлен --yes
+    #[arg(long)]
+    trash: bool,
+
+    /// Вместе с --trash действительно перенести лишние копии в корзину. Навсегда ничего не удаляется: файлы можно вернуть из корзины
+    #[arg(long, requires = "trash")]
+    yes: bool,
+
+    /// Вывести отчёт в формате JSON — для скриптов и других программ
+    #[arg(long)]
+    json: bool,
+
     /// Показать эту справку
     #[arg(short, long, action = ArgAction::Help)]
     help: Option<bool>,
+
+    /// Показать версию программы
+    #[arg(short = 'V', long, action = ArgAction::Version)]
+    version: Option<bool>,
 }
 
 /// Что именно искать в папке.
@@ -64,7 +84,37 @@ pub enum SearchMode {
     SimilarPhotos { similarity_percent: u8 },
 }
 
+/// Что сделать с найденными лишними копиями.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    Report,
+    DryRun,
+    MoveToTrash,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputFormat {
+    Text,
+    Json,
+}
+
 impl Cli {
+    pub fn action(&self) -> Action {
+        match (self.trash, self.yes) {
+            (false, _) => Action::Report,
+            (true, false) => Action::DryRun,
+            (true, true) => Action::MoveToTrash,
+        }
+    }
+
+    pub fn output_format(&self) -> OutputFormat {
+        if self.json {
+            OutputFormat::Json
+        } else {
+            OutputFormat::Text
+        }
+    }
+
     pub fn search_mode(&self) -> SearchMode {
         if !self.similar {
             return SearchMode::ExactDuplicates;
@@ -104,6 +154,13 @@ fn missing_argument_message(err: &clap::Error) -> String {
         );
     }
 
+    if missing_arguments.contains(&TRASH_FLAG) {
+        return format!(
+            "{CONFIRM_FLAG} подтверждает перенос в корзину — добавьте {TRASH_FLAG}. \
+             Например: dupes {TRASH_FLAG} {CONFIRM_FLAG} ~/Загрузки"
+        );
+    }
+
     "Укажите папку, в которой искать одинаковые файлы или похожие фото. Например: dupes ~/Загрузки"
         .to_string()
 }
@@ -113,7 +170,7 @@ fn repeated_argument_message(err: &clap::Error) -> String {
         Some(argument) => {
             let flag = argument.to_string();
             let flag_name = flag.split_whitespace().next().unwrap_or(&flag);
-            format!("Параметр {flag_name} указан несколько раз — оставьте одно значение.")
+            format!("Параметр {flag_name} указан несколько раз — укажите его один раз.")
         }
         None => GENERIC_ARGUMENTS_MESSAGE.to_string(),
     }
@@ -259,20 +316,77 @@ mod tests {
 
         assert_eq!(
             message,
-            "Параметр --similarity указан несколько раз — оставьте одно значение.\nСправка: dupes --help"
+            "Параметр --similarity указан несколько раз — укажите его один раз.\nСправка: dupes --help"
         );
     }
 
     #[test]
-    fn repeated_similar_flag_is_explained() {
-        let error = parse_error(&["dupes", "--similar", "--similar", "folder"]);
+    fn repeated_flags_without_value_are_explained_neutrally() {
+        for flag in ["--similar", "--trash", "--yes", "--json"] {
+            let error = parse_error(&["dupes", "--similar", "--trash", flag, flag, "folder"]);
+
+            let message = argument_error_message(&error);
+
+            assert_eq!(
+                message,
+                format!(
+                    "Параметр {flag} указан несколько раз — укажите его один раз.\nСправка: dupes --help"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn yes_without_trash_asks_to_add_it() {
+        let error = parse_error(&["dupes", "--yes", "folder"]);
 
         let message = argument_error_message(&error);
 
-        assert!(
-            message.starts_with("Параметр --similar указан несколько раз"),
-            "{message}"
+        assert_eq!(
+            message,
+            "--yes подтверждает перенос в корзину — добавьте --trash. \
+             Например: dupes --trash --yes ~/Загрузки\nСправка: dupes --help"
         );
+    }
+
+    #[test]
+    fn action_follows_trash_and_yes_flags() {
+        let cases: [(&[&str], Action); 3] = [
+            (&["dupes", "folder"], Action::Report),
+            (&["dupes", "--trash", "folder"], Action::DryRun),
+            (
+                &["dupes", "--trash", "--yes", "folder"],
+                Action::MoveToTrash,
+            ),
+        ];
+
+        for (arguments, expected) in cases {
+            let cli = Cli::try_parse_from(arguments).unwrap();
+
+            assert_eq!(cli.action(), expected, "{arguments:?}");
+        }
+    }
+
+    #[test]
+    fn output_is_text_unless_json_is_requested() {
+        let text = Cli::try_parse_from(["dupes", "folder"]).unwrap();
+        let json = Cli::try_parse_from(["dupes", "--json", "folder"]).unwrap();
+
+        assert_eq!(text.output_format(), OutputFormat::Text);
+        assert_eq!(json.output_format(), OutputFormat::Json);
+    }
+
+    #[test]
+    fn version_flags_display_the_version() {
+        for flag in ["--version", "-V"] {
+            let error = parse_error(&["dupes", flag]);
+
+            assert_eq!(error.kind(), ErrorKind::DisplayVersion);
+            assert_eq!(
+                error.to_string(),
+                format!("dupes {}\n", env!("CARGO_PKG_VERSION"))
+            );
+        }
     }
 
     #[test]
