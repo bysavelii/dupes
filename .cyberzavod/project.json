@@ -1,0 +1,36 @@
+{
+  "projectId": "dupes",
+  "harness": "0.7.1",
+  "workflow": "default",
+  "journal": ".cyberzavod/journal",
+  "agents": {
+    "planning": {
+      "provider": "anthropic",
+      "agent": "claude",
+      "model": "default"
+    },
+    "implementation": {
+      "provider": "anthropic",
+      "agent": "claude",
+      "model": "default"
+    },
+    "review": {
+      "provider": "anthropic",
+      "agent": "claude",
+      "model": "default"
+    },
+    "verification": {
+      "provider": "anthropic",
+      "agent": "claude",
+      "model": "default"
+    }
+  },
+  "verification": {
+    "commands": [],
+    "paths": []
+  },
+  "stack": {
+    "languages": [],
+    "frameworks": []
+  }
+}
